@@ -1,5 +1,18 @@
-// models/Order.js
 const mongoose = require("mongoose");
+
+const assignedStaffSchema = new mongoose.Schema({
+  _id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Staff',
+    required: true
+  },
+  name: {
+    type: String,
+    required: true
+  },
+  email: String,
+  phone: String
+});
 
 const OrderSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
@@ -26,8 +39,17 @@ const OrderSchema = new mongoose.Schema({
     tax: Number,
     total: Number,
   },
-  orderId: String,
+  assignedStaff: assignedStaffSchema,
+
+  orderId: { type: String, unique: true, required: true },
+
   orderDate: { type: Date, default: Date.now },
-});
+
+  status: {
+    type: String,
+    enum: ['pending', 'confirmed', 'rejected', 'completed'],
+    default: 'pending'
+  },
+}, { timestamps: true });
 
 module.exports = mongoose.model("Order", OrderSchema);

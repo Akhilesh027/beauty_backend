@@ -2,14 +2,17 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
+const bcrypt = require('bcrypt');
 const multer = require('multer');
 const jwt = require('jsonwebtoken');
-
 const Product = require('./models/Product.js');
 const Cart = require("./models/Cart.js");
 const Service = require('./models/Service');
 const User = require('./models/User.js');
 const order = require('./models/order.js');
+const Staf = require('./models/Staff.js');
+const Staff = require('./models/Staff.js');
+const Package = require('./models/Package.js');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -513,22 +516,25 @@ res.json(cart);
 });
 
 // Update quantity of a product in cart
-app.put("/api/cart/update", async (req, res) => {
-  const { userId, productId, quantity } = req.body;
+// Update product quantity in cart
+app.put("/api/cart/update/:userId/:productId/:quantity", async (req, res) => {
+  const { userId, productId, quantity } = req.params;
 
   if (!userId) return res.status(400).json({ error: "userId is required" });
   if (!productId) return res.status(400).json({ error: "productId is required" });
-  if (quantity == null || quantity < 1)
+  if (!quantity || Number(quantity) < 1)
     return res.status(400).json({ error: "quantity must be at least 1" });
 
   try {
     let cart = await Cart.findOne({ userId });
     if (!cart) return res.status(404).json({ error: "Cart not found" });
 
-    const item = cart.items.find(item => item.productId.toString() === productId.toString());
+    const item = cart.items.find(
+      (item) => item.productId.toString() === productId.toString()
+    );
     if (!item) return res.status(404).json({ error: "Product not found in cart" });
 
-    item.quantity = quantity;
+    item.quantity = Number(quantity);
     await cart.save();
     res.json(cart);
   } catch (err) {
@@ -536,42 +542,51 @@ app.put("/api/cart/update", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// Remove a single product from cart
-app.delete("/api/cart/remove", async (req, res) => {
-  const { userId, productId } = req.body;
-
-  if (!userId) return res.status(400).json({ error: "userId is required" });
-  if (!productId) return res.status(400).json({ error: "productId is required" });
-
+// Remove from cart (DELETE /api/cart/remove/:userId/:productId)
+app.delete("/api/cart/remove/:userId/:productId", async (req, res) => {
+  const { userId, productId } = req.params;
   try {
-    let cart = await Cart.findOne({ userId });
-    if (!cart) return res.json({ items: [] });
+    const cart = await Cart.findOne({ userId });
+    if (!cart) return res.status(404).json({ message: "Cart not found" });
 
-    cart.items = cart.items.filter(item => item.productId.toString() !== productId.toString());
+    if (!cart.products) cart.products = [];
+
+    // Find product index
+    const index = cart.products.findIndex(
+      (item) => item.productId.toString() === productId
+    );
+
+    if (index === -1) {
+      return res.status(404).json({ message: "Product not found in cart" });
+    }
+
+    // Remove product
+    cart.products.splice(index, 1);
     await cart.save();
-    res.json(cart);
+
+    // ✅ Always return `products`
+    res.json({ products: cart.products });
   } catch (err) {
-    console.error("Cart remove error:", err);
+    console.error("Remove Cart Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
-
-// Clear all items in cart
-app.delete("/api/cart/clear", async (req, res) => {
-  const { userId } = req.body;
-
-  if (!userId) return res.status(400).json({ error: "userId is required" });
-
+// Clear cart (DELETE /api/cart/clear/:userId)
+app.delete("/api/cart/clear/:userId", async (req, res) => {
+  const { userId } = req.params;
   try {
-    const cart = await Cart.findOne({ userId });
-    if (!cart) return res.json({ items: [] });
+    const cart = await Cart.findOneAndUpdate(
+      { userId },
+      { products: [] },
+      { new: true }
+    );
 
-    cart.items = [];
-    await cart.save();
-    res.json(cart);
+    if (!cart) return res.status(404).json({ message: "Cart not found" });
+
+    // ✅ Always return `products`
+    res.json({ products: cart.products });
   } catch (err) {
-    console.error("Cart clear error:", err);
+    console.error("Clear Cart Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -618,34 +633,396 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   }
 });
 
-// Remove from cart
-app.post("/api/cart/remove", async (req, res) => {
-  const { userId, productId } = req.body;
-  try {
-    const cart = await Cart.findOne({ userId });
-    if (!cart) return res.status(404).json({ message: "Cart not found" });
 
-    cart.items = cart.items.filter(
-      (item) => item.productId.toString() !== productId
+
+
+app.post('/api/staff/register', async (req, res) => {
+  try {
+    const { name, phone, email, skills, role, password } = req.body;
+
+    if (!name || !phone || !email || !password) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const existingStaff = await Staff.findOne({ phone });
+    if (existingStaff) {
+      return res.status(409).json({ error: 'Staff with this phone already exists' });
+    }
+
+    // Hash password before saving
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const staff = new Staff({ name, phone, email, skills, role, password: hashedPassword });
+    await staff.save();
+
+    res.status(201).json({ message: 'Registration successful' });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Server error during registration' });
+  }
+});
+
+// Login route with JWT token issuance
+app.post('/api/staff/login', async (req, res) => {
+  try {
+    const { phone, otp } = req.body;
+
+    // Replace OTP verification with real method in production
+    if (otp !== '1234') {
+      return res.status(401).json({ error: 'Invalid OTP' });
+    }
+
+    const staff = await Staff.findOne({ phone });
+    if (!staff) {
+      return res.status(404).json({ error: 'Staff not found' });
+    }
+
+    // Generate JWT token with staff ID and role
+    const token = jwt.sign(
+      { staffId: staff._id, role: staff.role }, 
+      process.env.JWT_SECRET || 'BANNU9', 
+      { expiresIn: '7d' }
     );
-    await cart.save();
 
-    res.json(cart);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.json({
+      staff: {
+        id: staff._id,
+        name: staff.name,
+        phone: staff.phone,
+        email: staff.email,
+        skills: staff.skills,
+        role: staff.role,
+      },
+      authToken: token,
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Server error during login' });
   }
 });
 
-// Clear cart
-app.post("/api/cart/clear", async (req, res) => {
-  const { userId } = req.body;
+// Fetch single staff
+app.get('/api/staff/:id', async (req, res) => {
+  const staff = await Staff.findById(req.params.id);
+  res.json(staff);
+});
+
+// Fetch all staff
+app.get('/api/staff', async (req, res) => {
+  const staffList = await Staff.find();
+  res.json(staffList);
+});
+
+// PATCH /api/bookings/:id/assign - Assign staff to a booking
+app.patch('/api/bookings/:id/assign', async (req, res) => {
   try {
-    await Cart.findOneAndUpdate({ userId }, { items: [] });
-    res.json({ message: "Cart cleared" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    const { id } = req.params;
+    const { staffId } = req.body;
+
+    // Validate input
+    if (!staffId) {
+      return res.status(400).json({ message: 'Staff ID is required' });
+    }
+
+    // Check if booking exists
+    const booking = await order.findById(id);
+    if (!booking) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    // Check if staff exists
+    const staff = await Staff.findById(staffId);
+    if (!staff) {
+      return res.status(404).json({ message: 'Staff member not found' });
+    }
+
+    // Update booking with assigned staff
+    booking.assignedStaff = {
+      _id: staff._id,
+      name: staff.name,
+      email: staff.email,
+      phone: staff.phone
+    };
+
+    // Update status to assigned if it was unassigned
+    if (booking.status === 'unassigned' || !booking.status) {
+      booking.status = 'assigned';
+    }
+
+    const updatedBooking = await booking.save();
+
+    res.json({
+      message: 'Staff assigned successfully',
+      assignedStaff: updatedBooking.assignedStaff,
+      booking: updatedBooking
+    });
+
+  } catch (error) {
+    console.error('Error assigning staff:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
+
+// GET /api/bookings - Get all bookings
+app.get('/api/bookings', async (req, res) => {
+  try {
+    const bookings = await order.find().sort({ orderDate: -1 });
+    res.json(bookings);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.get('/api/bookings/assigned/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    // Find bookings where assignedStaff._id matches userId
+    const bookings = await order.find({ 'assignedStaff._id': userId });
+    res.json(bookings);
+  } catch (error) {
+    res.status(500).json({ error: 'Server error fetching bookings' });
+  }
+});
+// Get dashboard stats for a staff user
+app.get('/api/dashboard/stats/:staffId', async (req, res) => {
+  try {
+    const staffId = req.params.staffId;
+    
+    // Example: count bookings by status for this staff user
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const todayAppointments = await order.countDocuments({
+      'assignedStaff._id': staffId,
+      orderDate: { $gte: today }
+    });
+    
+    const completed = await order.countDocuments({
+      'assignedStaff._id': staffId,
+      status: 'completed'
+    });
+    
+    const pending = await order.countDocuments({
+      'assignedStaff._id': staffId,
+      status: 'pending'
+    });
+
+    // Example earnings aggregation, assuming `amounts.total`
+    const earningsAgg = await order.aggregate([
+      { $match: { 'assignedStaff._id': staffId, status: 'completed' } },
+      { $group: { _id: null, totalEarnings: { $sum: '$amounts.total' } } }
+    ]);
+    const totalEarnings = earningsAgg.length ? earningsAgg[0].totalEarnings : 0;
+
+    // Example rating, placeholder
+    const rating = 4.5;
+
+    res.json({ todayAppointments, completed, pending, totalEarnings, rating });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error fetching stats' });
+  }
+});
+
+// Get bookings assigned to staff user filtered by optional status
+app.get('/api/bookings/assigned/:staffId', async (req, res) => {
+  try {
+    const staffId = req.params.staffId;
+    const status = req.query.status; // e.g., 'pending', 'upcoming', 'completed'
+
+    const filter = { 'assignedStaff._id': staffId };
+    if (status) {
+      filter.status = status;
+    }
+
+    const bookings = await order.find(filter).sort({ orderDate: 1 });
+
+    res.json(bookings);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error fetching bookings' });
+  }
+});
+
+// Accept a pending booking
+app.post('/api/bookings/:bookingId/accept', async (req, res) => {
+  try {
+    const bookingId = req.params.bookingId;
+
+    // Update booking status to accepted
+    const booking = await order.findByIdAndUpdate(bookingId, { status: 'confirmed' }, { new: true });
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+    res.json({ message: 'Booking accepted', booking });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error accepting booking' });
+  }
+});
+
+// Reject a pending booking
+app.post('/bookings/:bookingId/reject', async (req, res) => {
+  try {
+    const bookingId = req.params.bookingId;
+
+    // Update booking status to rejected or canceled
+    const booking = await order.findByIdAndUpdate(bookingId, { status: 'rejected' }, { new: true });
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+    res.json({ message: 'Booking rejected', booking });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error rejecting booking' });
+  }
+});
+// Complete a booking
+app.post('/api/bookings/:bookingId/complete', async (req, res) => {
+  try {
+    const bookingId = req.params.bookingId;
+    const booking = await order.findByIdAndUpdate(
+      bookingId,
+      { status: 'completed' },
+      { new: true }
+    );
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+    res.json({ message: 'Booking marked as completed', booking });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error completing booking' });
+  }
+});
+
+// Mark booking as not completed
+app.post('/api/bookings/:bookingId/not_completed', async (req, res) => {
+  try {
+    const bookingId = req.params.bookingId;
+    const booking = await order.findByIdAndUpdate(
+      bookingId,
+      { status: 'not_completed' },
+      { new: true }
+    );
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+    res.json({ message: 'Booking marked as not completed', booking });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error updating booking' });
+  }
+});
+// Get all packages
+app.get('/api/packages', async (req, res) => {
+  try {
+    const packages = await Package.find().populate('services.productId', 'name');
+    res.json(packages);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch packages.' });
+  }
+});
+
+// Get all products (services) - from your products API or here for convenience
+app.get('/api/products', async (req, res) => {
+  try {
+    const products = await Product.find({}, 'name');  // select only name field
+    res.json(products);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch products.' });
+  }
+});
+
+// Create a new package
+app.post('/api/packages', async (req, res) => {
+  try {
+    const { name, services, amount } = req.body;
+
+    // Ensure services is an array of product IDs
+    if (!Array.isArray(services) || services.length === 0) {
+      return res.status(400).json({ error: 'Please provide at least one service.' });
+    }
+
+    // Fetch service details from products to embed service names (optional)
+    const serviceDocs = await Product.find({ _id: { $in: services } }, 'name');
+
+    const servicesWithName = serviceDocs.map((s) => ({
+      productId: s._id,
+      name: s.name,
+    }));
+
+    const newPackage = new Package({
+      name,
+      services: servicesWithName,
+      amount,
+    });
+
+    await newPackage.save();
+
+    res.json({ message: 'Package created successfully.', package: newPackage });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create package.' });
+  }
+});
+
+// Update package
+app.put('/api/packages/:id', async (req, res) => {
+  try {
+    const { name, services, amount } = req.body;
+    const id = req.params.id;
+
+    const serviceDocs = await Product.find({ _id: { $in: services } }, 'name');
+    const servicesWithName = serviceDocs.map((s) => ({
+      productId: s._id,
+      name: s.name,
+    }));
+
+    const updatedPackage = await Package.findByIdAndUpdate(
+      id,
+      { name, services: servicesWithName, amount },
+      { new: true }
+    );
+
+    if (!updatedPackage) return res.status(404).json({ error: 'Package not found' });
+
+    res.json({ message: 'Package updated.', package: updatedPackage });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update package.' });
+  }
+});
+app.get('/api/packages/:packageId', async (req, res) => {
+  const { packageId } = req.params;
+  if (!packageId) return res.status(400).json({ error: 'packageId is required' });
+
+  try {
+    const pkg = await Package.findById(packageId).populate('services'); // example Mongoose call
+    if (!pkg) return res.status(404).json({ error: 'Package not found' });
+    res.json(pkg);
+  } catch (err) {
+    console.error('Get package error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+app.get("/api/products/:ids", async (req, res) => {
+  const ids = req.params.ids.split(",");
+  try {
+    const products = await Product.find({ _id: { $in: ids } });
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch products" });
+  }
+});
+
+// Delete package
+app.delete('/api/packages/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const deleted = await Package.findByIdAndDelete(id);
+
+    if (!deleted) return res.status(404).json({ error: 'Package not found' });
+
+    res.json({ message: 'Package deleted.' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete package.' });
+  }
+});
+
+
 // Start server
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
