@@ -13,6 +13,7 @@ const order = require('./models/order.js');
 const Staf = require('./models/Staff.js');
 const Staff = require('./models/Staff.js');
 const Package = require('./models/Package.js');
+const Referral = require('./models/Referral.js');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -55,78 +56,100 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://akhileshreddy811_db_u
 .catch(err => console.log(err));
 
 // Routes
-app.post('/api/register', async (req, res) => {
-  try {
-    const { firstName, lastName, email, password, age, gender } = req.body;
+// Example referral code generator (use your own if needed)
+async function generateUniqueReferralCode(baseName = 'USR') {
+  const prefix = ('' + baseName).replace(/[^a-zA-Z]/g, '').slice(0, 3).toUpperCase() || 'USR';
+  let code;
+  let exists = true;
+  // try until unique (rare collision)
+  do {
+    code = prefix + Math.random().toString(36).substring(2, 7).toUpperCase();
+    exists = await User.exists({ referralCode: code });
+  } while (exists);
+  return code;
+}
+function generateReferralCode(name) {
+  return (name.substring(0, 3) + Math.random().toString(36).substring(2, 6)).toUpperCase();
+}
 
-    // Check if user already exists
-    let user = await User.findOne({ email });
-    if (user) {
-      return res.status(400).json({ message: 'User already exists' });
+// Register route
+app.post("/api/register", async (req, res) => {
+  try {
+    let { firstName, lastName, email, password, age, gender, referralCode } = req.body;
+
+    if (!firstName || !lastName || !email || !password || !age || !gender) {
+      return res.status(400).json({ message: "All fields are required" });
     }
 
-    // Create new user
-    user = new User({
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(400).json({ message: "User already exists" });
+    }
+
+    const newReferralCode = generateReferralCode(firstName);
+    const user = new User({
       firstName,
       lastName,
-      email,
-      password,
+      email: email.toLowerCase(),
+      password, // plain → will be hashed by pre-save
       age,
-      gender
+      gender,
+      referralCode: newReferralCode,
+      referredBy: referralCode ? referralCode.toUpperCase() : null,
     });
 
+    // Save user
     await user.save();
 
-    // Generate JWT token
-    const payload = {
-      id: user.id
-    };
-
-    const token = jwt.sign(payload, 'BANNU9', {
-      expiresIn: '7d'
-    });
-
-    res.status(201).json({
-      token,
-      user: {
-        id: user.id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: user.email,
-        age: user.age,
-        gender: user.gender
+    // Reward referrer if referralCode is provided
+    if (referralCode) {
+      const referrer = await User.findOne({ referralCode: referralCode.toUpperCase() });
+      if (referrer) {
+        referrer.wallet += 100; // reward coins
+        await referrer.save();
       }
-    });
-  } catch (error) {
-    console.error(error.message);
-    res.status(500).json({ message: 'Server error' });
+    }
+res.json({
+  token: token || "",
+  user: {
+    id: user._id,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    email: user.email,
+    wallet: user.wallet,
+    referralCode: user.referralCode,
+    referredBy: user.referredBy,
+  },
+});
+
+    res.status(201).json({ message: "User registered successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
   }
 });
 
 // Login
-app.post('/api/login', async (req, res) => {
+app.post("/api/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Check if user exists
-    const user = await User.findOne({ email });
+    if (!email || !password) {
+      return res.status(400).json({ message: "All fields are required" });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) {
-      return res.status(400).json({ message: 'Invalid credentials' });
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
-    // Check password
-    const isMatch = await user.comparePassword(password);
+    const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(400).json({ message: 'Invalid credentials' });
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
-    // Generate JWT token
-    const payload = {
-      id: user.id
-    };
-
-    const token = jwt.sign(payload, 'BANNU9', {
-      expiresIn: '7d'
+    const token = jwt.sign({ id: user._id }, 'BANNU9' || "BANNU9", {
+      expiresIn: "7d",
     });
 
     res.json({
@@ -136,16 +159,143 @@ app.post('/api/login', async (req, res) => {
         firstName: user.firstName,
         lastName: user.lastName,
         email: user.email,
-        age: user.age,
-        gender: user.gender
-      }
+        wallet: user.wallet,
+        referralCode: user.referralCode,
+        referredBy: user.referredBy,
+      },
     });
-  } catch (error) {
-    console.error(error.message);
-    res.status(500).json({ message: 'Server error' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
   }
 });
 
+
+app.get('/api/bookings/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    // Validate userId
+    if (!userId || userId.trim() === '') {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+    
+    const bookings = await order.find({ userId }).sort({ orderDate: -1 });
+    
+    if (bookings.length === 0) {
+      return res.status(404).json({ message: 'No bookings found for this user' });
+    }
+    
+    res.json(bookings);
+  } catch (error) {
+    console.error('Error fetching bookings:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+app.get('/api/referral/code/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ message: 'User ID is required' });
+
+    const referral = await Referral.findOne({ userId });
+    if (!referral) {
+      return res.status(404).json({ message: 'Referral entry not found' });
+    }
+
+    res.json({ referralCode: referral.referralCode });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.get('/api/referral/stats/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ message: 'User ID is required' });
+
+    const referral = await Referral.findOne({ userId });
+    if (!referral) {
+      return res.status(404).json({ message: 'Referral entry not found' });
+    }
+
+    // Ensure default values if not present
+    const stats = {
+      totalReferrals: referral.totalReferrals || 0,
+      successfulReferrals: referral.successfulReferrals || 0,
+      pendingReferrals: referral.pendingReferrals || 0,
+      earnedCredits: referral.earnedCredits || 0,
+      walletBalance: referral.walletBalance || 0 // if wallet is tracked here
+    };
+
+    res.json(stats);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.get('/api/referral/history/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ message: 'User ID is required' });
+
+    const referral = await Referral.findOne({ userId });
+    if (!referral) {
+      return res.status(404).json({ message: 'Referral entry not found' });
+    }
+
+    // Ensure history is an array
+    const history = Array.isArray(referral.history) ? referral.history : [];
+
+    res.json({ history });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/referral-status/:userId', async (req, res) => {
+  try {
+    const requestedUserId = req.params.userId;
+    const authenticatedUserId = req.params.userId;
+
+
+    // Optionally verify the requestedUserId matches authenticatedUserId
+    if (requestedUserId !== authenticatedUserId) {
+      return res.status(403).json({ message: 'Forbidden: Access denied' });
+    }
+
+
+    // Fetch user from database
+    const user = await User.findById(authenticatedUserId).lean();
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+
+    // Find users who were referred by this user's referralCode
+    const referredUsers = await User.find({ referredBy: user.referralCode })
+      .select('firstName lastName email coins referralCode')
+      .lean();
+
+
+    const referredList = referredUsers.map(u => ({
+      name: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email,
+      email: u.email,
+      earnedCoins: 125 // Or use actual logic if stored per referral
+    }));
+
+
+    res.json({
+      referralCode: user.referralCode,
+      coins: user.coins,
+      referralCount: user.referralCount,
+      referredUsers: referredList
+    });
+
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 // GET all services
 app.get('/api/services', async (req, res) => {
   try {
